@@ -1,0 +1,47 @@
+# =================================================================
+# Script: WiFi AP Connection Check
+# RouterOS Version: 7.x
+#
+# Description: Checks if a WiFi station interface is connected to
+# its designated primary Access Point. If it's connected to any
+# other AP, it forces a rescan to encourage it to find the
+# primary AP again.
+#
+# Set to run hourly with this command:
+# /system scheduler add name="Check_AP_hourly" interval=1h on-event="Check_AP"
+# =================================================================
+
+# --- Script Configuration ---
+# Set the radio-name of your PREFERRED/PRIMARY access point.
+:local primaryRadioName "Mapleleaf-S3/K7WAN"
+# Set the name of your WiFi station (client) interface (normally "wlan1").
+:local wifiInterface "wlan1"
+# --- End of Configuration ---
+
+# Do not edit below this line unless you know what you are doing.
+
+/log info message="AP Check: Starting check for interface '$wifiInterface'."
+
+# This direct method is more robust. It queries the status and radio-name
+# separately to avoid issues with variable types from the monitor command.
+:local monitorResult [/interface wireless monitor [find name=wlan1] once as-value]
+:local currentStatus ($monitorResult->"status")
+:local currentRadioName ($monitorResult->"radio-name")
+
+# Check if the interface is actually connected to any access point
+if ($currentStatus = "connected-to-ess") do={
+    # Now, check if the connected AP is NOT the primary one
+    if ($currentRadioName != $primaryRadioName) do={
+        /log warning message="AP Check: '$wifiInterface' is connected to non-primary AP ($currentRadioName). Forcing rescan to find $primaryRadioName."
+
+        # Force the interface to scan for other networks
+        /interface wireless scan $wifiInterface rounds=1
+        :delay 5s
+        /ip dhcp-client renew $wifiInterface
+    } else={
+        /log info message="AP Check: '$wifiInterface' is correctly connected to primary AP ($currentRadioName)."
+    }
+} else={
+    /log info message="AP Check: '$wifiInterface' is not connected (Current Status: $currentStatus)."
+}
+

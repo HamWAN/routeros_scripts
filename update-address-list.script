@@ -1,0 +1,148 @@
+# INSTALLATION
+#
+# upload update-address-list.script to your router
+# /system script add name=update-mylist source=[/file get update-address-list.script contents]
+# edit the script configuration: /system script edit [find name=update-mylist] source
+#
+# ==========================
+# CONFIGURATION
+# ==========================
+:local url "https://monitoring.ziply.hamwan.net/lists/mylist"
+:local listName "mylist"
+:local tmpFile "$listName.tmp"
+:local minSize 500
+:local timeout 30s
+
+# ==========================
+# FETCH (RouterOS 7.20+)
+# ==========================
+# Remove old temp file if exists
+:if ([:len [/file find name=$tmpFile]] > 0) do={
+    /file remove $tmpFile
+}
+:log info "Address list $listName update: downloading $url"
+
+/tool fetch url=$url dst-path=$tmpFile idle-timeout=$timeout
+:delay 2s
+
+# Verify file exists
+:if ([:len [/file find name=$tmpFile]] = 0) do={
+    :log error "Address list $listName update: fetch failed (file not created)"
+    :error "Fetch failed"
+}
+
+# Get file size
+:local size [/file get $tmpFile size]
+
+:if ($size < $minSize) do={
+    :log error ("Address list $listName update aborted: file too small (" . $size . " bytes)")
+    /file remove $tmpFile
+    :error "Listname file too small"
+}
+
+# Read contents
+:local data [/file get $tmpFile contents]
+
+:if ([:len $data] = 0) do={
+    :log error "Address list $listName update: file contents empty"
+    /file remove $tmpFile
+    :error "Fetch failed"
+}
+
+:log info ("Address list $listName update: download successful (" . $size . " bytes)")
+
+# ==========================
+# PARSE FILE
+#
+# Parse listname file
+# Assumes clean input format:
+# address[/cidr][space comment]
+
+:local newEntries []
+
+:while ([:len $data] > 0) do={
+
+    :local newlinePos [:find $data "\n"]
+    :local line
+
+    # Extract one line
+    :if ([:typeof $newlinePos] = "nil") do={
+        :set line $data
+        :set data ""
+    } else={
+        :set line [:pick $data 0 $newlinePos]
+        :set data [:pick $data ($newlinePos + 1) [:len $data]]
+    }
+
+    # Only process non-empty and non-comment lines
+    :if ([:len $line] != 0 && [:pick $line 0 1] != "#") do={
+
+        # Find first space separating address and comment
+        :local firstSpace [:find $line " "]
+        :local addr
+        :local comment ""
+
+        :if ([:typeof $firstSpace] = "nil") do={
+            # No comment present
+            :set addr $line
+        } else={
+            # Split address and comment
+            :set addr [:pick $line 0 $firstSpace]
+            :set comment [:pick $line ($firstSpace + 1) [:len $line]]
+        }
+
+        # Add to array
+        :if ([:len $addr] > 0) do={
+            :set newEntries ($newEntries, ($addr . "|" . $comment))
+        }
+    }
+}
+
+# ==========================
+# ADD / UPDATE ENTRIES
+# ==========================
+:foreach entry in=$newEntries do={
+
+    :local sep [:find $entry "|"]
+    :local addr [:pick $entry 0 $sep]
+    :local comm [:pick $entry ($sep + 1) [:len $entry]]
+
+    :local existing [/ip/firewall/address-list find where list=$listName and address=$addr]
+
+    :if ([:len $existing] = 0) do={
+        /ip/firewall/address-list add list=$listName address=$addr comment=$comm
+    } else={
+        :foreach i in=$existing do={
+            :local oldComment [/ip/firewall/address-list get $i comment]
+            :if ($oldComment != $comm) do={
+                /ip/firewall/address-list set $i comment=$comm
+            }
+        }
+    }
+}
+
+# ==========================
+# REMOVE OBSOLETE ENTRIES
+# ==========================
+:foreach i in=[/ip/firewall/address-list find where list=$listName !dynamic] do={
+
+    :local addr [/ip/firewall/address-list get $i address]
+    :local keep false
+
+    :foreach entry in=$newEntries do={
+        :local sep [:find $entry "|"]
+        :local newAddr [:pick $entry 0 $sep]
+
+        :if ($newAddr = $addr) do={
+            :set keep true
+        }
+    }
+
+    :if (!$keep) do={
+        /ip/firewall/address-list remove $i
+        :log info ("Address list $listName: removed obsolete " . $addr)
+    }
+}
+
+/file remove $tmpFile
+:log info "Address list $listName update complete."
